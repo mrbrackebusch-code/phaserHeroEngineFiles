@@ -1893,8 +1893,8 @@ if (_overlapHandlers.length && spritesSnapshot.length > 1) {
 ------------------------------------------------------- */
 
 namespace screen {
-    export let width: number = 320;
-    export let height: number = 240;
+    export let width: number = 640;
+    export let height: number = 480;
 }
 
 
@@ -1904,6 +1904,16 @@ namespace screen {
 namespace scene {
     export const HUD_Z = 100;
     export const UPDATE_PRIORITY = 10;
+
+
+    export function screenWidth(): number {
+    // Use the compat screen namespace
+    return screen.width | 0
+    }
+
+    export function screenHeight(): number {
+        return screen.height | 0
+    }
 
 
 
@@ -1956,6 +1966,46 @@ export function setBackgroundColor(colorIndex: number): void {
 
 }
 
+
+
+// ------------------------------------------------------
+// tiles namespace (stub) – just enough for HeroEngine
+// ------------------------------------------------------
+namespace tiles {
+    // Minimal shape; expand later if you want real data
+    export interface TileMapData {
+        id: string;      // e.g., "level1"
+        // add width/height/data later if needed
+    }
+
+    let _current: TileMapData | null = null;
+
+    export function setCurrentTilemap(tm: TileMapData): void {
+        _current = tm;
+        console.log("[tiles.setCurrentTilemap] (stub) current =", tm);
+    }
+
+    export function currentTilemap(): TileMapData | null {
+        return _current;
+    }
+}
+
+
+
+
+// ------------------------------------------------------
+// tilemap`...` tagged template (stub)
+// ------------------------------------------------------
+function tilemap(
+    strings: TemplateStringsArray,
+    ...expr: any[]
+): tiles.TileMapData {
+    // In MakeCode, this is compile-time. Here we just
+    // turn `tilemap`level1`` into an object with id "level1".
+    const id = strings.join("${}");
+    console.log("[tilemap] (stub) requested map id =", id, "expr =", expr);
+    return { id };
+}
 
 
 
@@ -2742,6 +2792,9 @@ export function apply(snap: WorldSnapshot): void {
 ;(globalThis as any).screen = screen;
 ;(globalThis as any).controller = controller;
 ;(globalThis as any).effects = effects;
+
+;(globalThis as any).tiles = tiles;
+;(globalThis as any).tilemap = tilemap;
 
 ;(globalThis as any).SpriteKind = SpriteKind;
 ;(globalThis as any).SpriteFlag = SpriteFlag;
