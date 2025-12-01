@@ -72,6 +72,7 @@ namespace SpriteKind {
     export let EnemySpawner: number
     export let SupportBeam: number
     export let SupportIcon: number
+    export let Wall: number
 }
 
 
@@ -100,7 +101,16 @@ namespace SpriteKind {
 //   r2() – Round a value to 2 decimal places (numeric helper).
 //   r3() – Round a value to 3 decimal places (numeric helper).
 //
-// SECTION 3 - STUDENT HOOKS: HERO LOGIC & ANIMATION
+//
+// SECTION 2.5 - TILEMAP AND WORLD GENERATION
+//    initWorldTileMap() - Run the tilemap functions (called from the "game start" function)
+//    createTileMap2D() - Makes the tilemap array
+//    createWallTileImage() - Makes an image for the walls in the tilemap array
+//    buildTilesIntoSprites() - Makes walls where they are supposed to be in the tilemap
+//    readTile() - Accesses the array and determines what tile is there
+//
+//
+// SECTION 3 - STUDENT HOOKS: HERO LOGIC & ANIMATION - NO LONGER HERE. THEY ARE GONE. They have been moved to a project that uses the Hero Engine extension.
 //   hero1Logic() – Student-editable logic for Hero 1's behavior each frame.
 //   hero2Logic() – Student-editable logic for Hero 2's behavior each frame.
 //   hero3Logic() – Student-editable logic for Hero 3's behavior each frame.
@@ -331,7 +341,11 @@ namespace HeroEngine {
         _started = true;
 
         ensureHeroSpriteKinds();
+
+        initWorldTileMap() 
+        
         scene.setBackgroundColor(1);
+        tiles.setCurrentTilemap(tilemap`level1`)
         setupHeroes();
         setupTestEnemies();
         setupEnemySpawners();
@@ -388,9 +402,25 @@ namespace userconfig {
 
 
 // --------------------------------------------------------------
+// INTERNAL TILEMAP SYSTEM (GLOBAL ENGINE SPACE)
+// Completely hidden from wrapper / HeroEngine namespace
+// --------------------------------------------------------------
+
+const WORLD_TILE_SIZE = 32          // private
+const TILE_EMPTY = 0                // private
+const TILE_WALL = 1                 // private
+
+// 2D array of numbers for engine-internal use only
+let _engineWorldTileMap: number[][] = []
+
+
+
+// --------------------------------------------------------------
 // Sprite kinds (lazy init for extension safety)
 // --------------------------------------------------------------
 let _heroKindsInitialized = false
+
+
 
 function ensureHeroSpriteKinds() {
     if (_heroKindsInitialized) return
@@ -404,7 +434,9 @@ function ensureHeroSpriteKinds() {
     if (!SpriteKind.EnemySpawner) SpriteKind.EnemySpawner = SpriteKind.create()
     if (!SpriteKind.SupportBeam) SpriteKind.SupportBeam = SpriteKind.create()
     if (!SpriteKind.SupportIcon) SpriteKind.SupportIcon = SpriteKind.create()
+    if (!SpriteKind.Wall) SpriteKind.Wall = SpriteKind.create()
 }
+
 
 
 // Phaser/ESM shim: ensure custom SpriteKinds exist before any overlaps are registered.
@@ -518,7 +550,11 @@ const HERO_DATA = {
     BUSY_UNTIL: "busyUntil",           // heroBusyUntil[heroIndex]
     MOVE_SPEED_MULT: "mvMult",         // heroMoveSpeedMult[heroIndex]
     DAMAGE_AMP_MULT: "dmgMult",        // heroDamageAmpMult[heroIndex]
-    BUFF_JSON: "buffsJson"             // JSON snapshot of heroBuffs[heroIndex]
+    BUFF_JSON: "buffsJson",             // JSON snapshot of heroBuffs[heroIndex]
+
+    // NEW: for tile-collision rollback
+    PREV_X: "prevX",
+    PREV_Y: "prevY"
 }
 
 
@@ -719,11 +755,20 @@ const AURA_COLOR_INTELLECT = 8
 const AURA_COLOR_HEAL = 7 // green-ish
 
 
+
+
+
+
+// ================================================================
+// ================================================================
 // ================================================================
 // SECTION 2 - HELPER FUNCTIONS
 // ================================================================
 // Utility helpers used across the engine. Stateless. No side effects.
-
+// ================================================================
+// ================================================================
+// ================================================================
+// ================================================================
 
 
 
@@ -797,6 +842,371 @@ function r3(v: number) { return Math.round(v * 1000) / 1000 }
 
 
 
+
+// ================================================================
+// ================================================================
+// ================================================================
+// SECTION 2.5 - TILEMAP AND WORLD GENERATION
+// ================================================================
+// Generates the tilemap 2D array and makes images for it
+// ================================================================
+
+function _createTileMap2D(): number[][] {
+    const tile = WORLD_TILE_SIZE
+
+    let cols = Math.idiv(scene.screenWidth(), tile)
+    let rows = Math.idiv(scene.screenHeight(), tile)
+
+    // Make sure we have enough space for a box + gaps
+    if (cols < 5) cols = 5
+    if (rows < 5) rows = 5
+
+    // Start all empty
+    const map: number[][] = []
+    for (let r = 0; r < rows; r++) {
+        const row: number[] = []
+        for (let c = 0; c < cols; c++) {
+            row.push(TILE_EMPTY)
+        }
+        map.push(row)
+    }
+
+    // Inset the box by ~1/4 of the map size
+    const marginRows = Math.idiv(rows, 4)
+    const marginCols = Math.idiv(cols, 4)
+
+    const topR = marginRows
+    const bottomR = rows - 1 - marginRows
+    const leftC = marginCols
+    const rightC = cols - 1 - marginCols
+
+    // Center tile (for the gaps)
+    const centerR = Math.idiv(rows, 2)
+    const centerC = Math.idiv(cols, 2)
+
+    // Horizontal walls (top & bottom), leave gap at centerC
+    for (let c = leftC; c <= rightC; c++) {
+        if (c !== centerC) {
+            map[topR][c] = TILE_WALL
+            map[bottomR][c] = TILE_WALL
+        }
+    }
+
+    // Vertical walls (left & right), leave gap at centerR
+    for (let r = topR; r <= bottomR; r++) {
+        if (r !== centerR) {
+            map[r][leftC] = TILE_WALL
+            map[r][rightC] = TILE_WALL
+        }
+    }
+
+    return map
+}
+
+
+function _createWallTileImage(): Image {
+    const s = WORLD_TILE_SIZE
+    const img = image.create(s, s)
+
+    // Black base
+    img.fill(15)
+
+    // Gray speckles
+    for (let y = 0; y < s; y++) {
+        for (let x = 0; x < s; x++) {
+            if (randint(0, 7) === 0) img.setPixel(x, y, 13)
+        }
+    }
+
+    // Stripes
+    for (let x = 0; x < s; x += 4) {
+        for (let y = 0; y < s; y++) img.setPixel(x, y, 1)
+    }
+
+    return img
+}
+
+function _buildTilesIntoSprites(map: number[][]): void {
+    const tile = WORLD_TILE_SIZE
+    const wallImg = _createWallTileImage()
+
+    for (let r = 0; r < map.length; r++) {
+        const row = map[r]
+        for (let c = 0; c < row.length; c++) {
+            if (row[c] !== TILE_WALL) continue
+
+            const s = sprites.create(wallImg, SpriteKind.Wall)
+            s.left = c * tile
+            s.top = r * tile
+            s.z = 5
+        }
+    }
+}
+
+
+
+
+// This is called ONLY by HeroEngine.start()
+function initWorldTileMap(): void {
+    _engineWorldTileMap = _createTileMap2D()
+    _buildTilesIntoSprites(_engineWorldTileMap)
+}
+
+
+function _readTile(r: number, c: number): number {
+    if (r < 0 || r >= _engineWorldTileMap.length) return TILE_WALL
+    if (c < 0 || c >= _engineWorldTileMap[0].length) return TILE_WALL
+    return _engineWorldTileMap[r][c]
+}
+
+
+
+
+// ==========================================================
+// TILEMAP COLLISION – HEROES + ENEMIES, WITH LOGGING
+// Soft slide along walls instead of teleporting
+// ==========================================================
+
+let _tileCollFrame = 0
+
+// Check if an axis-aligned box overlaps any TILE_WALL
+function _boxOverlapsWall(
+    centerX: number,
+    centerY: number,
+    halfW: number,
+    halfH: number
+): boolean {
+    if (!_engineWorldTileMap || _engineWorldTileMap.length === 0) return false
+
+    const map = _engineWorldTileMap
+    const rows = map.length
+    const cols = map[0].length
+    const tileSize = WORLD_TILE_SIZE
+
+    const left = centerX - halfW
+    const right = centerX + halfW - 1
+    const top = centerY - halfH
+    const bottom = centerY + halfH - 1
+
+    const minCol = Math.idiv(left, tileSize)
+    const maxCol = Math.idiv(right, tileSize)
+    const minRow = Math.idiv(top, tileSize)
+    const maxRow = Math.idiv(bottom, tileSize)
+
+    for (let r = minRow; r <= maxRow; r++) {
+        if (r < 0 || r >= rows) continue
+        const rowArr = map[r]
+        for (let c = minCol; c <= maxCol; c++) {
+            if (c < 0 || c >= cols) continue
+            if (rowArr[c] === TILE_WALL) {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+
+
+// Soft-slide resolver for a group (heroes or enemies)
+function _resolveTilemapCollisionsForGroup(group: Sprite[], label: string): void {
+    if (!_engineWorldTileMap || _engineWorldTileMap.length === 0) return
+
+    const tileSize = WORLD_TILE_SIZE
+    const map = _engineWorldTileMap
+    const rows = map.length
+    const cols = map[0].length
+
+    // Log occasionally so we can see what's happening
+    const doFrameLog = (_tileCollFrame % 30) === 0
+    if (doFrameLog) {
+        console.log(
+            "[tileColl] frame" + _tileCollFrame +
+            "group" + label +
+            "count" + group.length +
+            "map" + rows + "x" + cols +
+            "tileSize" + tileSize
+        )
+    }
+
+    for (let i = 0; i < group.length; i++) {
+        const s = group[i]
+        if (!s) continue
+
+        const prevX = sprites.readDataNumber(s, HERO_DATA.PREV_X)
+        const prevY = sprites.readDataNumber(s, HERO_DATA.PREV_Y)
+        const cx = s.x
+        const cy = s.y
+
+        const halfW = s.width >> 1
+        const halfH = s.height >> 1
+
+        // If we don't have a prev snapshot, skip for this frame
+        if (!(prevX || prevX === 0) || !(prevY || prevY === 0)) continue
+
+        // ------------------------------------------
+        // Soft slide resolution:
+        // 1) test X movement (cx, prevY)
+        // 2) then test Y (finalX, cy)
+        // ------------------------------------------
+
+        let finalX = cx
+        let finalY = cy
+        let blockedX = false
+        let blockedY = false
+
+        // Test horizontal movement (X) first
+        if (_boxOverlapsWall(cx, prevY, halfW, halfH)) {
+            blockedX = true
+            finalX = prevX  // can't move into the wall; keep previous X
+        } else {
+            finalX = cx     // X is ok, Y will be resolved next
+        }
+
+        // Test vertical movement (Y) with resolved X
+        if (_boxOverlapsWall(finalX, cy, halfW, halfH)) {
+            blockedY = true
+            finalY = prevY  // can't move into the wall; keep previous Y
+        } else {
+            finalY = cy
+        }
+
+        // Apply final position
+        s.x = finalX
+        s.y = finalY
+
+        // Zero out velocity on the blocked axes so they "slide"
+        if (blockedX) s.vx = 0
+        if (blockedY) s.vy = 0
+
+        if (blockedX || blockedY) {
+            console.log(
+                "[tileColl]" + label + "#" + i +
+                "blockedX" + blockedX + "blockedY" + blockedY +
+                "prev=(" + prevX + "," + prevY + ")" +
+                "curr=(" + cx + "," + cy + ")" +
+                "final=(" + finalX + "," + finalY + ")"
+            )
+        } else if (doFrameLog && i === 0) {
+            // Occasional sample log even when no collision,
+            // so we know the system is actually running.
+            console.log(
+                "[tileColl]" + label + "#" + i +
+                "no collision" +
+                "prev=(" + prevX + "," + prevY + ")" +
+                "curr=(" + cx + "," + cy + ")"
+            )
+        }
+    }
+}
+
+function resolveHeroTilemapCollisions(): void {
+    if (!_engineWorldTileMap || _engineWorldTileMap.length === 0) return
+
+    const map = _engineWorldTileMap
+    const rows = map.length
+    const cols = map[0].length
+    const tileSize = WORLD_TILE_SIZE
+
+    // Resolve collision for a single sprite (hero or enemy)
+    function resolveForSprite(s: Sprite) {
+        if (!s) return
+
+        const halfW = s.width >> 1
+        const halfH = s.height >> 1
+
+        // Run a couple of passes in case we overlap more than one tile
+        for (let iter = 0; iter < 3; iter++) {
+            const left = s.x - halfW
+            const right = s.x + halfW - 1
+            const top = s.y - halfH
+            const bottom = s.y + halfH - 1
+
+            const minCol = Math.idiv(left, tileSize)
+            const maxCol = Math.idiv(right, tileSize)
+            const minRow = Math.idiv(top, tileSize)
+            const maxRow = Math.idiv(bottom, tileSize)
+
+            let moved = false
+
+            for (let r = minRow; r <= maxRow; r++) {
+                if (r < 0 || r >= rows) continue
+                const rowArr = map[r]
+                for (let c = minCol; c <= maxCol; c++) {
+                    if (c < 0 || c >= cols) continue
+                    if (rowArr[c] !== TILE_WALL) continue
+
+                    const tileLeft = c * tileSize
+                    const tileRight = tileLeft + tileSize
+                    const tileTop = r * tileSize
+                    const tileBottom = tileTop + tileSize
+
+                    // Compute overlaps on each side
+                    const overlapLeft = right - tileLeft
+                    const overlapRight = tileRight - left
+                    const overlapTop = bottom - tileTop
+                    const overlapBottom = tileBottom - top
+
+                    // If any are <= 0, AABBs don't overlap on that axis
+                    if (overlapLeft <= 0 || overlapRight <= 0 || overlapTop <= 0 || overlapBottom <= 0) {
+                        continue
+                    }
+
+                    // Minimal penetration on each axis
+                    const penX = overlapLeft < overlapRight ? overlapLeft : overlapRight
+                    const penY = overlapTop < overlapBottom ? overlapTop : overlapBottom
+
+                    if (penX < penY) {
+                        // Push in X
+                        const tileCenterX = tileLeft + tileSize / 2
+                        if (s.x < tileCenterX) {
+                            s.x -= penX
+                        } else {
+                            s.x += penX
+                        }
+                        // Soft slide: kill only X velocity
+                        s.vx = 0
+                    } else {
+                        // Push in Y
+                        const tileCenterY = tileTop + tileSize / 2
+                        if (s.y < tileCenterY) {
+                            s.y -= penY
+                        } else {
+                            s.y += penY
+                        }
+                        // Soft slide: kill only Y velocity
+                        s.vy = 0
+                    }
+
+                    moved = true
+                }
+            }
+
+            // If we didn't adjust position this pass, we are out of walls
+            if (!moved) break
+        }
+    }
+
+    // Apply to all heroes
+    for (let hi = 0; hi < heroes.length; hi++) {
+        const h = heroes[hi]
+        if (h) resolveForSprite(h)
+    }
+
+    // Apply to all enemies
+    for (let ei = 0; ei < enemies.length; ei++) {
+        const e = enemies[ei]
+        if (e) resolveForSprite(e)
+    }
+}
+
+// Main entry to call from onUpdate
+function resolveTilemapCollisions(): void {
+    _tileCollFrame++
+    resolveHeroTilemapCollisions()
+    //_resolveTilemapCollisionsForGroup(heroes, "Hero")
+    //_resolveTilemapCollisionsForGroup(enemies, "Enemy")
+}
 
 
 // ================================================================
@@ -1049,6 +1459,7 @@ function doHeroMoveForPlayer(playerId: number, button: string) {
 
 
     // -----------------------------
+    // -----------------------------
     // Mana cost & check
     // -----------------------------
     // Simple sum of the four trait values
@@ -1063,6 +1474,12 @@ function doHeroMoveForPlayer(playerId: number, button: string) {
     mana -= manaCost
     sprites.setDataNumber(hero, HERO_DATA.MANA, mana)
     updateHeroManaBar(heroIndex)
+
+    // Floating negative blue mana number
+    if (manaCost > 0) {
+        showDamageNumber(hero.x, hero.y - 10, -manaCost, "mana")
+    }
+
 
     // -----------------------------
     // Aim / movement setup
@@ -1288,6 +1705,10 @@ function createHeroForPlayer(playerId: number, startX: number, startY: number) {
     const hero = sprites.create(image.create(16, 16), SpriteKind.Player)
     hero.x = startX; hero.y = startY; hero.z = 20
 
+    // NEW: seed previous position for collisions
+    sprites.setDataNumber(hero, HERO_DATA.PREV_X, hero.x)
+    sprites.setDataNumber(hero, HERO_DATA.PREV_Y, hero.y)
+    
     const heroIndex = heroes.length; heroes.push(hero)
     playerToHeroIndex[playerId] = heroIndex
 
@@ -1327,7 +1748,7 @@ function createHeroForPlayer(playerId: number, startX: number, startY: number) {
     heroTargetCircles[heroIndex] = null
 
     initHeroHP(heroIndex, hero, 100)
-    initHeroMana(heroIndex, hero, 1000)
+    initHeroMana(heroIndex, hero, 2000)
     refreshHeroController(heroIndex)
 
     // NEW: let the student animation hook define what this hero actually looks like
@@ -1336,10 +1757,25 @@ function createHeroForPlayer(playerId: number, startX: number, startY: number) {
 }
 
 function setupHeroes() {
-    createHeroForPlayer(1, 80, 60)
-    createHeroForPlayer(2, 40, 60)
-    createHeroForPlayer(3, 120, 60)
-    createHeroForPlayer(4, 80, 90)
+    
+    const W = userconfig.ARCADE_SCREEN_WIDTH
+    const H = userconfig.ARCADE_SCREEN_HEIGHT
+    const centerW = W/2
+    const centerH = H / 2
+    const offset = 20
+
+    const coords = [
+        [centerW + offset, centerH + offset],
+        [centerW - offset, centerH + offset],
+        [centerW + offset, centerH - offset],
+        [centerW - offset, centerH - offset]
+    ]
+
+
+    createHeroForPlayer(1, coords[0][0], coords[0][1])
+    createHeroForPlayer(2, coords[1][0], coords[1][1])
+    createHeroForPlayer(3, coords[2][0], coords[2][1])
+    createHeroForPlayer(4, coords[3][0], coords[3][1])
 }
 
 function lockHeroControls(heroIndex: number) {
@@ -1508,9 +1944,29 @@ function regenHeroManaAll(percentOfMax: number) {
     }
 }
 
-function showDamageNumber(x: number, y: number, amount: number) {
-    const txt = textsprite.create("" + amount)
-    txt.setPosition(x, y); txt.setMaxFontHeight(6); txt.lifespan = 400; txt.vy = -20
+
+function showDamageNumber(x: number, y: number, amount: number, kind?: string) {
+    let k = (kind || "damage").toLowerCase()
+
+    // Choose foreground color (text color) per kind
+    // Tuned for the usual Arcade palette:
+    // 2 = red, 6 = green, 9 = dark blue
+    let fg = 2 // damage = red
+    if (k.indexOf("heal") >= 0) {
+        fg = 6 // heal = green
+    } else if (k.indexOf("mana") >= 0) {
+        fg = 9 // mana = blue
+    }
+
+    // bg = 0 (black), fg = chosen color
+    const txt = textsprite.create("" + amount, 0, fg)
+    txt.setMaxFontHeight(9)        // a bit larger than before
+    txt.setBorder(0, 0, 0)         // no extra border box
+    txt.setOutline(1, 15)          // thin black outline around the colored text
+
+    txt.setPosition(x, y)
+    txt.lifespan = 900             // was 400 → more than double time on screen
+    txt.vy = -12                   // slower rise so it's readable
 }
 
 
@@ -1794,10 +2250,10 @@ function calculateStrengthStats(baseTimeMs: number, traits: number[]) {
     const stats = makeBaseStats(baseTimeMs)
 
     // Pull raw trait values, floor at 0, NO upper cap
-    let tWind = (traits[1] | 0)
-    let tReach = (traits[2] | 0)
-    let tArc = (traits[3] | 0)
-    let tKnock = (traits[4] | 0)
+    let tWind = (traits[1] | 0) // windup & damage
+    let tReach = (traits[2] | 0) // reach distance
+    let tArc = (traits[3] | 0)   // total arc degrees
+    let tKnock = (traits[4] | 0) // knockback amount
 
     if (tWind < 0) tWind = 0
     if (tReach < 0) tReach = 0
@@ -1805,37 +2261,49 @@ function calculateStrengthStats(baseTimeMs: number, traits: number[]) {
     if (tKnock < 0) tKnock = 0
 
     // ----------------------------------------------------
-    // WINDUP (traits[1]) → damage, move duration, swing time
+    // DAMAGE (traits[1])
     // ----------------------------------------------------
     // Damage starts at 80%, then +2% per point of tWind
-    // (no upper bound; can get absurd)
     stats[STAT.DAMAGE_MULT] = 80 + tWind * 2
 
-    // Move duration: baseTimeMs plus 10ms per point of tWind
-    stats[STAT.MOVE_DURATION] = baseTimeMs + tWind * 10
+    // ----------------------------------------------------
+    // TIMING: windup (pre-cast) + swing (actual arc)
+    // ----------------------------------------------------
+    // We treat baseTimeMs as the *total* lock at tWind=0, then:
+    //   moveDuration = windupBase + tWind*10 + SWING_MS
+    //   windupMs    = moveDuration - SWING_MS
+    const BASE_SWING_MS = 220
 
-    // Swing animation: 400ms plus 5ms per point of tWind
-    stats[STAT.STRENGTH_SWING_MS] = 400 + tWind * 5
+    let windupBase = baseTimeMs - BASE_SWING_MS
+    if (windupBase < 80) windupBase = 80 // always some visible windup
+
+    const windupMs = windupBase + tWind * 10
+    const totalMoveMs = windupMs + BASE_SWING_MS
+
+    // Constant swing, trait-driven windup
+    stats[STAT.STRENGTH_SWING_MS] = BASE_SWING_MS
+    stats[STAT.MOVE_DURATION] = totalMoveMs
 
     // ----------------------------------------------------
-    // REACH (traits[2]) → lunge speed
+    // LUNGE: Strength = tiny crawl forward during lock
     // ----------------------------------------------------
-    // Lunge speed: base 10, +1 per point of tReach (unbounded)
-    stats[STAT.LUNGE_SPEED] = 10 + tReach
+    // This feeds the generic lunge block:
+    //   hero.vx = aimX * LUNGE_SPEED; hero.vy = aimY * LUNGE_SPEED
+    // We ignore tReach here; reach is handled in the hitbox shape.
+    const STRENGTH_CRAWL_SPEED = 5 // px/s-ish velocity; feels like a slow lean
+    stats[STAT.LUNGE_SPEED] = STRENGTH_CRAWL_SPEED
 
     // ----------------------------------------------------
     // ARC (traits[3]) → total swing arc degrees
     // ----------------------------------------------------
-    // Base 30°, +1° per point of tArc, but NEVER above 360°
-    let arcDeg = 30 + tArc
+    let arcDeg = 1 + tArc
     if (arcDeg > 360) arcDeg = 360
     stats[STAT.STRENGTH_TOTAL_ARC_DEG] = arcDeg
 
     // ----------------------------------------------------
     // KNOCKBACK (traits[4]) → knockback percentage
     // ----------------------------------------------------
-    // Knockback: 150% base, +5% per point of tKnock (unbounded)
-    stats[STAT.KNOCKBACK_PCT] = 150 + tKnock * 5
+    stats[STAT.KNOCKBACK_PCT] = 10 + tKnock * 10
 
     return stats
 }
@@ -1864,20 +2332,43 @@ function executeStrengthMove(
     const knockbackPct = stats[STAT.KNOCKBACK_PCT] | 0
 
     // Strength-specific animation knobs (centralized in calculateStrengthStats)
-    const swingDurationMs = stats[STAT.STRENGTH_SWING_MS] || 220
-    const totalArcDeg = stats[STAT.STRENGTH_TOTAL_ARC_DEG] || 150
+    const swingDurationMsStat = stats[STAT.STRENGTH_SWING_MS] || 220
+    let moveDuration = stats[STAT.MOVE_DURATION] | 0
+    if (moveDuration <= swingDurationMsStat) moveDuration = swingDurationMsStat
 
+    // Windup is the pre-cast delay; swing is the actual arc duration
+    const windupMs = moveDuration - swingDurationMsStat
+    const totalArcDeg = stats[STAT.STRENGTH_TOTAL_ARC_DEG] || 150
     const isHeal = false // Strength move never heals
 
-    spawnStrengthSwingProjectile(
-        heroIndex, hero,
-        dmg, isHeal, button,
-        slowPct, slowDurationMs,
-        weakenPct, weakenDurationMs,
-        knockbackPct,
-        swingDurationMs,
-        totalArcDeg
-    )
+    const startMs = game.runtime()
+    let fired = false
+
+    // Delay the *actual* smash until after windupMs
+    game.onUpdate(function () {
+        if (fired) return
+
+        const now = game.runtime()
+        if (now - startMs < windupMs) return
+
+        const h = heroes[heroIndex]
+        if (!h || (h.flags & sprites.Flag.Destroyed)) {
+            fired = true
+            return
+        }
+
+        fired = true
+
+        spawnStrengthSwingProjectile(
+            heroIndex, h,
+            dmg, isHeal, button,
+            slowPct, slowDurationMs,
+            weakenPct, weakenDurationMs,
+            knockbackPct,
+            swingDurationMsStat,
+            totalArcDeg
+        )
+    })
 }
 
 
@@ -1985,6 +2476,8 @@ function findHeroLeadingEdgeDistance(hero: Sprite, nx: number, ny: number): numb
     return lastOpaqueDist
 }
 
+
+
 function spawnStrengthSwingProjectile(
     heroIndex: number,
     hero: Sprite,
@@ -2014,13 +2507,18 @@ function spawnStrengthSwingProjectile(
     // Inner radius: circle that fully contains hero sprite + aura + spacing
     const inner0 = getStrengthInnerRadiusForHero(hero)
 
-    // "Reach" = how far beyond that inner circle this move extends.
-    // For now, we hardcode to roughly one hero-size; later this becomes trait-driven.
-    const reachFromInner = Math.max(hero.width, hero.height)
+    // ----------------------------------------------------
+    // REACH: baseline just outside aura + trait-driven extra
+    // ----------------------------------------------------
+    let tReach = sprites.readDataNumber(hero, HERO_DATA.TRAIT2) | 0
+    if (tReach < 0) tReach = 0
+
+    const baseExtraReach = 4      // tiny bit beyond aura even at 0 reach
+    const extraPerPoint = 1       // 1px per trait point; tweak to taste
+    const reachFromInner = baseExtraReach + tReach * extraPerPoint
 
     // Create initial image at progress = 0 (tiny nub / initial thrust)
     const img0 = buildStrengthSmashBitmap(nx, ny, inner0, reachFromInner, totalArcDeg, 0)
-
 
     const proj = sprites.create(img0, SpriteKind.HeroWeapon)
     proj.z = hero.z + 1
@@ -2028,12 +2526,7 @@ function spawnStrengthSwingProjectile(
     proj.vy = 0
     proj.setPosition(hero.x, hero.y)
 
-    const swingDuration = 220
-
-    // Persist parameters for per-frame updater
-    sprites.setDataNumber(proj, PROJ_DATA.START_TIME, now)
-    sprites.setDataNumber(proj, "SS_SWING_MS", swingDuration)
-
+    const swingDuration = swingDurationMs || 220
 
     // Persist parameters for per-frame updater
     sprites.setDataNumber(proj, PROJ_DATA.START_TIME, now)
@@ -2042,9 +2535,9 @@ function spawnStrengthSwingProjectile(
     sprites.setDataNumber(proj, "SS_NX", nx)
     sprites.setDataNumber(proj, "SS_NY", ny)
 
-    // Semantics changed:
-    //  - "SS_ATTACH" now stores inner0 (the inner radius from hero center)
-    //  - "SS_REACH_FRONT" now stores the extra reach beyond inner0
+    // Semantics:
+    //  - "SS_ATTACH" stores inner0 (inner radius from hero center)
+    //  - "SS_REACH_FRONT" stores extra reach beyond inner0
     sprites.setDataNumber(proj, "SS_ATTACH", inner0)
     sprites.setDataNumber(proj, "SS_REACH_FRONT", reachFromInner)
 
@@ -2064,6 +2557,8 @@ function spawnStrengthSwingProjectile(
     sprites.setDataNumber(proj, PROJ_DATA.KNOCKBACK_PCT, knockbackPct)
     sprites.setDataString(proj, PROJ_DATA.MOVE_TYPE, "strengthSwing")
 }
+
+
 
 function updateStrengthProjectilesMotionFor(
     proj: Sprite, hero: Sprite, heroIndex: number, nowMs: number, iInArray: number
@@ -3660,6 +4155,7 @@ function detonateHealSpellAt(spell: Sprite, termX: number, termY: number) {
 }
 
 
+
 function applyHealToHeroIndex(heroIndex: number, amount: number) {
     const hero = heroes[heroIndex]; if (!hero) return
     let hp = sprites.readDataNumber(hero, HERO_DATA.HP)
@@ -3667,7 +4163,12 @@ function applyHealToHeroIndex(heroIndex: number, amount: number) {
     hp = Math.min(maxHp, hp + amount)
     sprites.setDataNumber(hero, HERO_DATA.HP, hp)
     updateHeroHPBar(heroIndex)
+
+    if (amount > 0) {
+        showDamageNumber(hero.x, hero.y - 6, amount, "heal")
+    }
 }
+
 
 
 //Heal/Support traits should be calculated using: heal amount at traits[1], haste amount at traits[2], damage amplification at traits[3], damage reduction amount at traits[4]
@@ -4109,12 +4610,166 @@ function completeSupportPuzzleForHero(heroIndex: number) {
 
 
 const ENEMY_KIND = {
-    GRUNT: { maxHP: 50, speed: 28, touchDamage: 8, tint: 6 /* green */ },
-    BRUTE: { maxHP: 160, speed: 18, touchDamage: 15, tint: 2 /* red */ }
+    GRUNT:  { maxHP: 50,  speed: 28, touchDamage: 8,  tint: 6  /* green  */ },
+    RUNNER: { maxHP: 30,  speed: 42, touchDamage: 6,  tint: 7  /* yellow */ },
+    BRUTE:  { maxHP: 160, speed: 18, touchDamage: 15, tint: 2  /* red    */ },
+    ELITE:  { maxHP: 260, speed: 22, touchDamage: 20, tint: 10 /* purple */ }
 }
 
 function enemyImageForKind(kind: string): Image {
-    // Base enemy
+
+    if (kind == "RUNNER") {
+        // Long, skinny runner
+        const imgRunner = img`
+            ..............................
+            ..............................
+            .............fffff............
+            ............fffffff...........
+            .............fffff............
+            ..............................
+            ..............................
+            ..........ff......ff..........
+            ..........f5f....f5ff.........
+            ........ffff5ffff5ffff........
+            .........fffdf55fdfff.........
+            .........ff2d5dd5d2ff.........
+            .........f25dddddd52f.........
+            .....ffff.fee5dd5eef.ffff.....
+            ...ff111bff66e55e66ffb111ff...
+            ...fbb111bf66e22e66fb111bbf...
+            ...fffbfbbfee2552eefbbfbfff...
+            ....f11bff2e25dd52e2ffb11f....
+            ....fb11bf52e2552e25fb11bf....
+            ......ffff25ee22ee52ffff......
+            ........f5f5e2552e5f5f........
+            .........f5fee22eef5f.........
+            .........f2feeeeeef2f.........
+            .........f2feeeeeef2f.........
+            ..........f2ffe5ff2f..........
+            ...........f.f45f.f...........
+            .............f5f..............
+            ............f4f...............
+            .............f................
+            ..............................
+            ..............................
+        `
+        return imgRunner
+    }
+
+    if (kind == "BRUTE") {
+        // Scary brute
+        const imgBrute = img`
+            ...................................
+            ...................................
+            .......fff...............fff.......
+            .....ff3ddf....fffff....fdd3ff.....
+            ....f3dfff3f.ffe333eff.f3fffd3f....
+            ....f33f..f3f3ddddddd3f3f..f33f....
+            .....ff...f3eddddddddde3f...ff.....
+            .........fe33ddddddddd33ef.........
+            ...ffff.fe3dd3efffffe3dd3ef.ffff...
+            ..fff3dff3d3efff1f1fffe3d3ffd3fff..
+            .....fe3d3def1f1fff1f1fed3d3ef.....
+            ......ff3ddfd1fffffff1dfdd3ff......
+            .......feddffd1fffff1dffddef.......
+            .......fe3fffffffffffffff3ef.......
+            ........fefd1fffffffff1dfef........
+            ........feffd1fffffff1dffef........
+            ........fefffffffffffffffef........
+            .......ffeef1fffffffff1feeff.......
+            ......fe3eeff1f1fff1f1ffee3ef......
+            .....f3fffeefd1fffff1dfeefff3f.....
+            ....fdf..ffe3fffffffff3eff..fdf....
+            ....f3f..fffe3efffffe3efff..f3f....
+            .....f...ffefe3ddddd3efeff...f.....
+            .........ffeeffe333effeeff.........
+            .........feeeeefffffeeeeef.........
+            ........ffeee333eee333eeeff........
+            ........ffeee33ddddd33eeeff........
+            .......efffeee3ddddd3eeefffe.......
+            ......eeffefee3ddddd3eefeffee......
+            .....eefffeefee3ddd3eefeefffee.....
+            .....effffee3ffeeeeeff3eeffffe.....
+            .....efffffe33efffffe33efffffe.....
+            ......eefefe3333eee3333efefee......
+            .......ffeefe3ddddddd3efeeff.......
+            ......effeeefe3ddddd3efeeeffe......
+            ....eefffeeeeffe333effeeeefffee....
+            ...effffffe33eefffffee33effffffe...
+            ...effffffee333eeeee333eeffffffe...
+            ...eeefffffeee3333333eeefffffeee...
+            .....eeeffffeeee333eeeeffffeee.....
+            ......efffffffeeeeeeefffffffe......
+            ......eeefffffffffffffffffeee......
+            .........efffffffffffffffe.........
+            ........effffefffffffeffffe........
+            ........efffeeeefffeeeefffe........
+            ........eeeeeeefffffeeeeeee........
+            ..........ee..eefffee..ee..........
+            ................eee................
+            ...................................
+            ...................................
+            ...................................
+        `
+        return imgBrute
+    }
+
+
+    if (kind == "ELITE") {
+        // Scary brute
+        const imgElite = img`
+            ......................................
+            .................ffff.................
+            ...............ff7117ff...............
+            .............ff71111117ff.............
+            ...........ff711111111117ff...........
+            ..........f7111111111111117f..........
+            .........f711111111111111117f.........
+            .........f111111177771111111f.........
+            ........f7111117effffe7111117f........
+            ........f11117effffffffe71111f........
+            .......f71117ffffffffffff71117f.......
+            ......f77717ffffffffffffff71777f......
+            .....f71177effffffffffffffe77117f.....
+            .....f11117ff71effffffe17ff71111f.....
+            ....f71117efe117effffe711efe71117f....
+            ...f71117efffe77ffffff77efffe71117f...
+            ..f71177effffffffeffeffffffffe77117f..
+            .f71117eefffeef7f1ee1f7feefffee71117f.
+            .f71177efffff1fe17ee71ef1fffffe77117f.
+            .f7717efeeefff7f7f77f7f7fffeeefe7177f.
+            .fe77efee777efffef11fefffe777eefe77ef.
+            ..feeffe711177efffeefffe771117effeef..
+            ...fefe711111717effffe717111117efef...
+            ....fe711111117117ee711711111117ef....
+            ...fee71111177711111111777111117eef...
+            ...fe771117e77e71111117e77e711177ef...
+            ....f77177e77ee77111177ee77e77177f....
+            ....fe777ee71efe771177efe17ee777ef....
+            .....fe7ee711eefe7117efee117ee7ef.....
+            ......feee7117efee11eefe7117eeef......
+            ......fee77117fffe77efff71177eef......
+            .......fe7117ef.ffeeff.fe7117ef.......
+            .......fe7177f..ffffff..f7717ef.......
+            ........fe77ef...ffff...fe77ef........
+            .........f7ef.....fff....fe7f.........
+            ........feef......ff......feef........
+            .......ffff.......f........ffff.......
+            .......ff........f...........ff.......
+            .......f......................f.......
+            .................ffff.................
+            ..............ffffffffff..............
+            ............ffffffffffffff............
+            .............ffffffffffff.............
+            ..............ffffffffff..............
+            .................ffff.................
+            ......................................
+            ......................................
+        `
+        return imgElite
+    }
+
+    // Base enemy sprite uses color 6 for the body; we tint that per kind.
     let imgBase = img`
         . . . . . . c c c c . . . . . .
         . . . . c c 6 6 6 6 c c . . . .
@@ -4124,15 +4779,16 @@ function enemyImageForKind(kind: string): Image {
         . c 6 6 6 6 6 6 6 6 6 6 6 6 c .
         . . . . c c 6 6 6 6 c c . . . .
     `
-    if (kind == "BRUTE") {
-        // crude "big red" variant: tint 6→2 (no scaling API in Arcade TS subset)
-        imgBase = tintImageReplace(imgBase, 6, 2)
+    const spec = (ENEMY_KIND as any)[kind] || ENEMY_KIND.GRUNT
+    const tint = spec.tint || 6
+    if (tint != 6) {
+        imgBase = tintImageReplace(imgBase, 6, tint)
     }
     return imgBase
 }
 
 function spawnEnemyOfKind(kind: string, x: number, y: number) {
-    const spec = (kind == "BRUTE") ? ENEMY_KIND.BRUTE : ENEMY_KIND.GRUNT
+    const spec = (ENEMY_KIND as any)[kind] || ENEMY_KIND.GRUNT
     const enemy = sprites.create(enemyImageForKind(kind), SpriteKind.Enemy)
     enemy.x = x; enemy.y = y; enemy.z = 10
     const eIndex = enemies.length; enemies.push(enemy)
@@ -4150,13 +4806,18 @@ function spawnEnemyOfKind(kind: string, x: number, y: number) {
     sprites.setDataNumber(enemy, ENEMY_DATA.ATK_COOLDOWN_UNTIL, 0)
 }
 
+
 // Corner spawners
 let enemySpawners: Sprite[] = []
 
+
+
 function setupEnemySpawners() {
+    enemySpawners = []
+
     const W = userconfig.ARCADE_SCREEN_WIDTH
     const H = userconfig.ARCADE_SCREEN_HEIGHT
-    const inset = 8
+    const inset = 20
 
     const coords = [
         [inset, inset],
@@ -4165,16 +4826,193 @@ function setupEnemySpawners() {
         [W - inset, H - inset]
     ]
 
+    // Big obvious "portal" – tweak later if you want prettier art
+    const spawnerImg = img`
+        . . . . . 1 1 1 1 . . . . . .
+        . . . 1 1 1 1 1 1 1 1 . . . .
+        . . 1 1 1 f f f f 1 1 1 . . .
+        . 1 1 f f f f f f f f 1 1 . .
+        . 1 f f f f e e f f f f 1 . .
+        . 1 f f f f e e f f f f 1 . .
+        . 1 f f f f f f f f f f 1 . .
+        . 1 1 f f f f f f f f 1 1 . .
+        . . 1 1 1 f f f f 1 1 1 . . .
+        . . . 1 1 1 1 1 1 1 1 . . . .
+        . . . . . 1 1 1 1 . . . . . .
+        . . . . . . 1 1 . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+    `
     for (let i = 0; i < coords.length; i++) {
-        const s = sprites.create(image.create(2, 2), SpriteKind.EnemySpawner)
+        const s = sprites.create(spawnerImg, SpriteKind.EnemySpawner)
         s.x = coords[i][0]
         s.y = coords[i][1]
-        s.z = 1
-        s.image.fill(1)
-
+        s.z = 100  // draw on top of background / tiles / bars
         enemySpawners.push(s)
     }
 }
+
+
+// --------------------------------------------------------------
+// Enemy steering: tile-aware BFS toward hero
+// --------------------------------------------------------------
+
+const _ENEMY_DIR_R: number[] = [-1, 1, 0, 0, -1, -1, 1, 1]
+const _ENEMY_DIR_C: number[] = [0, 0, -1, 1, -1, 1, -1, 1]
+
+// Compute a steering vector for enemy e toward hero h using the tilemap.
+// Falls back to straight-line homing if map is missing or path not found.
+function _enemySteerTowardHero(e: Sprite, h: Sprite, speed: number): void {
+    if (!_engineWorldTileMap || _engineWorldTileMap.length === 0) {
+        // Fallback: old behavior
+        const dx0 = h.x - e.x
+        const dy0 = h.y - e.y
+        let mag0 = Math.sqrt(dx0 * dx0 + dy0 * dy0)
+        if (mag0 === 0) mag0 = 1
+        e.vx = Math.idiv(dx0 * speed, mag0)
+        e.vy = Math.idiv(dy0 * speed, mag0)
+        return
+    }
+
+    const map = _engineWorldTileMap
+    const rows = map.length
+    const cols = map[0].length
+    const tileSize = WORLD_TILE_SIZE
+
+    // Convert world coords to tile coords
+    let startC = Math.idiv(e.x, tileSize)
+    let startR = Math.idiv(e.y, tileSize)
+    let goalC = Math.idiv(h.x, tileSize)
+    let goalR = Math.idiv(h.y, tileSize)
+
+    // Clamp into map bounds
+    if (startR < 0) startR = 0
+    if (startR >= rows) startR = rows - 1
+    if (startC < 0) startC = 0
+    if (startC >= cols) startC = cols - 1
+
+    if (goalR < 0) goalR = 0
+    if (goalR >= rows) goalR = rows - 1
+    if (goalC < 0) goalC = 0
+    if (goalC >= cols) goalC = cols - 1
+
+    // If enemy and hero end up in the same tile, just home directly
+    if (startR === goalR && startC === goalC) {
+        const dxSame = h.x - e.x
+        const dySame = h.y - e.y
+        let magSame = Math.sqrt(dxSame * dxSame + dySame * dySame)
+        if (magSame === 0) magSame = 1
+        e.vx = Math.idiv(dxSame * speed, magSame)
+        e.vy = Math.idiv(dySame * speed, magSame)
+        return
+    }
+
+    // BFS setup
+    const visited: number[][] = []
+    const prevR: number[][] = []
+    const prevC: number[][] = []
+    for (let r = 0; r < rows; r++) {
+        const vRow: number[] = []
+        const prRow: number[] = []
+        const pcRow: number[] = []
+        for (let c = 0; c < cols; c++) {
+            vRow.push(0)
+            prRow.push(-1)
+            pcRow.push(-1)
+        }
+        visited.push(vRow)
+        prevR.push(prRow)
+        prevC.push(pcRow)
+    }
+
+    const qr: number[] = []
+    const qc: number[] = []
+    let head = 0
+
+    qr.push(startR)
+    qc.push(startC)
+    visited[startR][startC] = 1
+    prevR[startR][startC] = startR
+    prevC[startR][startC] = startC
+
+    let found = false
+
+    while (head < qr.length) {
+        const r = qr[head]
+        const c = qc[head]
+        head++
+
+        if (r === goalR && c === goalC) {
+            found = true
+            break
+        }
+
+        for (let k = 0; k < _ENEMY_DIR_R.length; k++) {
+            const nr = r + _ENEMY_DIR_R[k]
+            const nc = c + _ENEMY_DIR_C[k]
+
+            if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue
+            if (visited[nr][nc]) continue
+
+            // Treat walls as blocked, but allow goal tile even if hero is standing in/near it.
+            if (map[nr][nc] === TILE_WALL && !(nr === goalR && nc === goalC)) continue
+
+            visited[nr][nc] = 1
+            prevR[nr][nc] = r
+            prevC[nr][nc] = c
+            qr.push(nr)
+            qc.push(nc)
+        }
+    }
+
+    if (!found) {
+        // No path: fallback to straight-line homing
+        const dxFail = h.x - e.x
+        const dyFail = h.y - e.y
+        let magFail = Math.sqrt(dxFail * dxFail + dyFail * dyFail)
+        if (magFail === 0) magFail = 1
+        e.vx = Math.idiv(dxFail * speed, magFail)
+        e.vy = Math.idiv(dyFail * speed, magFail)
+        return
+    }
+
+    // Backtrack from goal to find the next tile after the start
+    let tr = goalR
+    let tc = goalC
+
+    while (!(prevR[tr][tc] === startR && prevC[tr][tc] === startC)) {
+        const pr = prevR[tr][tc]
+        const pc = prevC[tr][tc]
+        // Safety: if something is weird, bail to straight-line
+        if (pr < 0 || pc < 0) {
+            const dxSafe = h.x - e.x
+            const dySafe = h.y - e.y
+            let magSafe = Math.sqrt(dxSafe * dxSafe + dySafe * dySafe)
+            if (magSafe === 0) magSafe = 1
+            e.vx = Math.idiv(dxSafe * speed, magSafe)
+            e.vy = Math.idiv(dySafe * speed, magSafe)
+            return
+        }
+        tr = pr
+        tc = pc
+    }
+
+    // (tr, tc) is now the next tile on the path.
+    const targetX = tc * tileSize + tileSize / 2
+    const targetY = tr * tileSize + tileSize / 2
+
+    const dx = targetX - e.x
+    const dy = targetY - e.y
+    let mag = Math.sqrt(dx * dx + dy * dy)
+    if (mag === 0) mag = 1
+
+    e.vx = Math.idiv(dx * speed, mag)
+    e.vy = Math.idiv(dy * speed, mag)
+}
+
+
 
 
 
@@ -4250,7 +5088,8 @@ function updateEnemyHoming(now: number) {
             if (now >= atkUntil) { phase = 0; sprites.setDataNumber(e, ENEMY_DATA.ATK_PHASE, 0) }
         } else {
             // Normal homing
-            e.vx = Math.idiv(dx * speed, mag); e.vy = Math.idiv(dy * speed, mag)
+            _enemySteerTowardHero(e, h, speed)
+            //e.vx = Math.idiv(dx * speed, mag); e.vy = Math.idiv(dy * speed, mag)
         }
     }
 }
@@ -4305,16 +5144,21 @@ function updateEnemyHPBar(enemyIndex: number) {
     bar.value = Math.max(0, Math.min(100, Math.idiv(hp * 100, maxHp)))
 }
 
+
+
 function applyDamageToEnemyIndex(eIndex: number, amount: number) {
     if (eIndex < 0 || eIndex >= enemies.length) return
     const enemy = enemies[eIndex]; if (!enemy) return
     let hp = sprites.readDataNumber(enemy, ENEMY_DATA.HP)
     hp = Math.max(0, hp - amount)
+    showDamageNumber(enemy.x, enemy.y - 6, amount, "damage")
     sprites.setDataNumber(enemy, ENEMY_DATA.HP, hp)
     updateEnemyHPBar(eIndex)
     flashEnemyOnDamage(enemy)
     if (hp <= 0) enemy.destroy(effects.disintegrate, 200)
 }
+
+
 
 // NEW: Enemy flash on damage
 function flashEnemyOnDamage(enemy: Sprite) {
@@ -4515,6 +5359,16 @@ function updateEnemyEffects(now: number) {
 // Master update
 game.onUpdate(function () {
     if (!HeroEngine._isStarted()) return
+
+    // NEW: snapshot previous positions for all heroes
+    for (let hi = 0; hi < heroes.length; hi++) {
+        const h = heroes[hi]
+        if (h) {
+            sprites.setDataNumber(h, HERO_DATA.PREV_X, h.x)
+            sprites.setDataNumber(h, HERO_DATA.PREV_Y, h.y)
+        }
+    }
+
     updateHeroFacingsFromVelocity()
     updatePlayerInputs()
     const now = game.runtime()
@@ -4536,6 +5390,9 @@ game.onUpdate(function () {
 
     updateHeroAuras()                  // aura + combo meter
 
+    // NEW: enforce collisions with logical wall tiles
+    resolveTilemapCollisions()
+    
     for (let hi = 0; hi < heroes.length; hi++) { const h = heroes[hi]; if (h) debugAgilityDashProgress(h, hi) }
     updateEnemyHoming(now)             // AI + attacks
 
@@ -4608,33 +5465,165 @@ game.onUpdateInterval(500, function () {
 
 
 
+// Wave spawns — scripted waves with short breaks between them.
+// The interval below is the *tick* rate for the spawner; the wave table
+// controls when we are allowed to spawn and which kinds appear.
 
-// Wave spawns — randomized time/kind/location (weighted by elapsed time)
+
+function showWaveBanner(waveIdx: number) {
+    let label = "Wave " + (waveIdx + 1)
+    if (WAVE_DEFS && waveIdx >= 0 && waveIdx < WAVE_DEFS.length) {
+        const w = WAVE_DEFS[waveIdx]
+        if (w && (w as any).label) label = (w as any).label
+    }
+
+    // bg=0 (dark), fg=1 (blue title)
+    const txt = textsprite.create(label, 0, 1)
+    txt.setMaxFontHeight(8)
+    txt.setBorder(1, 15, 2)   // white border + padding
+    txt.setOutline(1, 15)
+
+    txt.lifespan = 1800
+    txt.vy = -10
+
+    const W = userconfig.ARCADE_SCREEN_WIDTH
+    const H = userconfig.ARCADE_SCREEN_HEIGHT
+    txt.setPosition(W / 2, H / 4)
+}
+
+
+
+// Wave spawns — scripted waves with short breaks between them.
+// The interval below is the *tick* rate; WAVE_DEFS controls spawn density + types.
 const ENEMY_SPAWN_INTERVAL_MS = 1200
-let waveStartMs = game.runtime()
+
+const WAVE_DEFS = [
+    {
+        label: "Wave 1 – Warmup",
+        durationMs: 12000,
+        breakMs: 4000,
+        spawnChance: 0.5,              // 50% of ticks spawn
+        kinds: ["GRUNT"],
+        weights: [1]
+    },
+    {
+        label: "Wave 2 – More Grunts",
+        durationMs: 14000,
+        breakMs: 4000,
+        spawnChance: 0.75,             // 75% of ticks spawn
+        kinds: ["GRUNT"],
+        weights: [1]
+    },
+    {
+        label: "Wave 3 – Runners Join",
+        durationMs: 16000,
+        breakMs: 4500,
+        spawnChance: 0.8,
+        kinds: ["GRUNT", "RUNNER"],
+        weights: [3, 1]                // few runners
+    },
+    {
+        label: "Wave 4 – Brutes Arrive",
+        durationMs: 18000,
+        breakMs: 4500,
+        spawnChance: 0.9,
+        kinds: ["GRUNT", "RUNNER", "BRUTE"],
+        weights: [3, 2, 1]
+    },
+    {
+        label: "Wave 5 – Elite Mix",
+        durationMs: 20000,
+        breakMs: 5000,
+        spawnChance: 1.0,
+        kinds: ["GRUNT", "RUNNER", "BRUTE", "ELITE"],
+        weights: [3, 3, 2, 2]
+    }
+]
+
+// Wave state
+let currentWaveIndex = 0
+let currentWaveIsBreak = true
+let wavePhaseUntilMs = game.runtime() + 1000 // short delay before first wave
+
+function pickEnemyKindForWave(waveIdx: number): string {
+    if (!WAVE_DEFS || WAVE_DEFS.length == 0) return "GRUNT"
+    if (waveIdx < 0) waveIdx = 0
+    if (waveIdx >= WAVE_DEFS.length) waveIdx = WAVE_DEFS.length - 1
+    const w = WAVE_DEFS[waveIdx]
+    if (!w || !w.kinds || !w.weights || w.kinds.length == 0) return "GRUNT"
+
+    let total = 0
+    for (let i = 0; i < w.weights.length; i++) {
+        const wt = w.weights[i] | 0
+        if (wt > 0) total += wt
+    }
+    if (total <= 0) return "GRUNT"
+    let roll = randint(1, total)
+    for (let i = 0; i < w.kinds.length; i++) {
+        const wt = w.weights[i] | 0
+        if (wt <= 0) continue
+        if (roll <= wt) return w.kinds[i]
+        roll -= wt
+    }
+    return "GRUNT"
+}
 
 game.onUpdateInterval(ENEMY_SPAWN_INTERVAL_MS, function () {
     if (!HeroEngine._isStarted()) return
-
-    const elapsed = game.runtime() - waveStartMs
-
-    // If no spawners yet, skip
     if (!enemySpawners || enemySpawners.length == 0) return
 
-    // Use the engine's own randint helper so we're 100% Arcade-safe
+    const now = game.runtime()
+
+    if (!WAVE_DEFS || WAVE_DEFS.length == 0) {
+        const idx = randint(0, enemySpawners.length - 1)
+        const s = enemySpawners[idx]
+        spawnEnemyOfKind("GRUNT", s.x, s.y)
+        return
+    }
+
+    // Phase transitions
+    if (now >= wavePhaseUntilMs) {
+        if (currentWaveIsBreak) {
+            // Start / resume a wave
+            currentWaveIsBreak = false
+            const w = (currentWaveIndex < WAVE_DEFS.length)
+                ? WAVE_DEFS[currentWaveIndex]
+                : WAVE_DEFS[WAVE_DEFS.length - 1]
+            wavePhaseUntilMs = now + (w.durationMs | 0)
+            showWaveBanner(currentWaveIndex)
+        } else {
+            // Wave just ended – schedule next break
+            currentWaveIsBreak = true
+            if (currentWaveIndex < WAVE_DEFS.length - 1) {
+                currentWaveIndex++
+            }
+            const w = (currentWaveIndex < WAVE_DEFS.length)
+                ? WAVE_DEFS[currentWaveIndex]
+                : WAVE_DEFS[WAVE_DEFS.length - 1]
+            wavePhaseUntilMs = now + (w.breakMs | 0)
+        }
+        return
+    }
+
+    if (currentWaveIsBreak) {
+        // Rest window: no spawns
+        return
+    }
+
+    // Active wave: spawn with wave-specific spawnChance
+    const wave = (currentWaveIndex < WAVE_DEFS.length)
+        ? WAVE_DEFS[currentWaveIndex]
+        : WAVE_DEFS[WAVE_DEFS.length - 1]
+    const chance = (wave as any).spawnChance || 1
+    if (chance < 1 && Math.random() > chance) return
+
     const idx = randint(0, enemySpawners.length - 1)
     const s = enemySpawners[idx]
-
-    // Weight BRUTE more as time passes (same logic as before)
-    const t = Math.min(1, elapsed / 60000) // by 60s, bias near cap
-    const bruteWeight = 0.15 + 0.5 * t
-
-    if (Math.random() < bruteWeight) {
-        spawnEnemyOfKind("BRUTE", s.x, s.y)
-    } else {
-        spawnEnemyOfKind("GRUNT", s.x, s.y)
-    }
+    const kind = pickEnemyKindForWave(currentWaveIndex)
+    spawnEnemyOfKind(kind, s.x, s.y)
 })
+
+
 
 
 
